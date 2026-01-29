@@ -1,0 +1,35 @@
+{
+  "name": "arbitrageedge-x402",
+  "version": "2.0.0",
+  "description": "Sports betting arbitrage API with x402 payments - Profit regardless of the outcome",
+  "type": "module",
+  "main": "bootstrap.js",
+  "scripts": {
+    "start": "node bootstrap.js",
+    "dev": "node --watch bootstrap.js"
+  },
+  "keywords": [
+    "arbitrage",
+    "sports-betting",
+    "api",
+    "x402",
+    "crypto-payments",
+    "usdc",
+    "base"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@coinbase/x402": "^2.1.0",
+    "@x402/core": "^2.1.0",
+    "@x402/express": "^2.1.0",
+    "@x402/evm": "^2.1.0",
+    "@x402/paywall": "^2.1.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.4.7",
+    "express": "^4.18.2"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
