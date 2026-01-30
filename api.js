@@ -202,6 +202,10 @@ function generateMockOpportunities(sport, minProfit, stake) {
 // EXPRESS APP
 // ============================================
 const app = express();
+
+// IMPORTANT: Trust Railway's proxy for correct HTTPS detection
+app.set('trust proxy', true);
+
 app.use(cors());
 app.use(express.json());
 
@@ -230,14 +234,9 @@ function apiKeyAuth(req, res, next) {
 app.use(
   paymentMiddleware(
     {
-      'GET /api/opportunities': {
+      'GET /api/opportunities/sport/*': {
         accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
-        description: 'Get all current arbitrage opportunities across 5 sports',
-        mimeType: 'application/json',
-      },
-      'GET /api/opportunities/*': {
-        accepts: [{ scheme: 'exact', price: '$0.01', network: NETWORK, payTo }],
-        description: 'Get specific arbitrage opportunity by ID',
+        description: 'Get arbitrage opportunities for a specific sport (soccer, basketball, tennis, nfl, mlb)',
         mimeType: 'application/json',
       },
     },
@@ -283,9 +282,9 @@ app.get('/', (req, res) => {
     
     <div class="card">
       <h2>💰 Pricing</h2>
-      <div class="endpoint">GET /api/opportunities → <span class="price">$0.03 USDC</span></div>
-      <div class="endpoint">GET /api/opportunities/:id → <span class="price">$0.01 USDC</span></div>
-      <p style="margin-top: 10px; color: #aaa;">Pay per request with USDC on Base. No subscriptions.</p>
+      <div class="endpoint">GET /api/opportunities/sport/:sport → <span class="price">$0.03 USDC</span></div>
+      <p style="margin-top: 10px; color: #aaa;">Pick a sport: soccer, basketball, tennis, nfl, mlb</p>
+      <p style="color: #aaa;">Pay per request with USDC on Base. No subscriptions.</p>
     </div>
     
     <div class="card">
@@ -324,17 +323,20 @@ app.get('/api', (req, res) => {
       asset: 'USDC',
       wallet: payTo,
       pricing: {
-        '/api/opportunities': '$0.03 per request',
-        '/api/opportunities/:id': '$0.01 per request'
+        '/api/opportunities/sport/:sport': '$0.03 per sport'
       }
     },
     endpoints: {
-      'GET /api/opportunities': {
-        description: 'Get all arbitrage opportunities',
-        query_params: { sport: 'soccer|basketball|tennis|nfl|mlb', min_profit: 'number', stake: 'number' }
+      'GET /api/opportunities/sport/:sport': {
+        description: 'Get arbitrage opportunities for a specific sport',
+        price: '$0.03 USDC',
+        sports: ['soccer', 'basketball', 'tennis', 'nfl', 'mlb'],
+        query_params: { min_profit: 'number', stake: 'number' }
       },
-      'GET /api/opportunities/:id': { description: 'Get specific opportunity' },
-      'GET /api/opportunities/sports/list': { description: 'List supported sports (free)' }
+      'GET /api/opportunities/sports/list': {
+        description: 'List supported sports',
+        price: 'FREE'
+      }
     }
   });
 });
@@ -352,37 +354,58 @@ app.get('/api/opportunities/sports/list', (req, res) => {
 // PROTECTED ENDPOINTS (payment OR API key required)
 // ============================================
 
-// Get all opportunities
-app.get('/api/opportunities', apiKeyAuth, (req, res) => {
-  // If no auth method set and we got here, x402 payment was verified
+// Get opportunities for a specific sport - $0.03
+app.get('/api/opportunities/sport/:sport', apiKeyAuth, (req, res) => {
   if (!req.authMethod) req.authMethod = 'x402';
   
-  const { sport, min_profit, stake } = req.query;
+  const { sport } = req.params;
+  const { min_profit, stake } = req.query;
+  
+  const validSports = ['soccer', 'basketball', 'tennis', 'nfl', 'mlb'];
+  if (!validSports.includes(sport.toLowerCase())) {
+    return res.status(400).json({ 
+      success: false, 
+      error: `Invalid sport. Valid options: ${validSports.join(', ')}` 
+    });
+  }
+  
   const opportunities = generateMockOpportunities(sport, min_profit, stake ? parseFloat(stake) : null);
   
   res.json({
     success: true,
+    sport: sport.toLowerCase(),
     count: opportunities.length,
     opportunities,
     auth_method: req.authMethod,
+    price_paid: '$0.03',
     cache_info: { cached: false, generated_at: new Date().toISOString() }
   });
 });
 
-// Get specific opportunity
-app.get('/api/opportunities/:id', apiKeyAuth, (req, res) => {
-  if (!req.authMethod) req.authMethod = 'x402';
-  
+// Redirect to sport selection (no longer a paid endpoint)
+app.get('/api/opportunities', (req, res) => {
+  res.json({
+    success: false,
+    message: 'Please select a sport',
+    endpoint: '/api/opportunities/sport/:sport',
+    price: '$0.03 USDC',
+    available_sports: ['soccer', 'basketball', 'tennis', 'nfl', 'mlb'],
+    example: '/api/opportunities/sport/soccer'
+  });
+});
+
+// Get specific opportunity by ID (free lookup if you have the ID)
+app.get('/api/opportunities/:id', (req, res) => {
   const { id } = req.params;
   const { stake } = req.query;
   const allOpps = generateMockOpportunities(null, null, stake ? parseFloat(stake) : null);
   const opportunity = allOpps.find(opp => opp.id === id);
   
   if (!opportunity) {
-    return res.status(404).json({ success: false, error: 'Opportunity not found' });
+    return res.status(404).json({ success: false, error: 'Opportunity not found or expired' });
   }
   
-  res.json({ success: true, opportunity, auth_method: req.authMethod });
+  res.json({ success: true, opportunity });
 });
 
 // ============================================
