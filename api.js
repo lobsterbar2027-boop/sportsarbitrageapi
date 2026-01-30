@@ -10,6 +10,7 @@ import { HTTPFacilitatorClient } from '@x402/core/server';
 import { facilitator } from '@coinbase/x402';
 import { createPaywall } from '@x402/paywall';
 import { evmPaywall } from '@x402/paywall/evm';
+import { declareDiscoveryExtension } from '@x402/extensions/bazaar';
 
 config();
 
@@ -46,6 +47,50 @@ const paywall = createPaywall()
   .withNetwork(evmPaywall)
   .withConfig({ appName: API_NAME, testnet: false })
   .build();
+
+// ============================================
+// x402scan BAZAAR SCHEMA (enables dropdown)
+// ============================================
+const BASE_URL = process.env.BASE_URL || 'https://sportsarbitrageapi-production.up.railway.app';
+
+const SUPPORTED_SPORTS = ['soccer', 'basketball', 'tennis', 'nfl', 'mlb'];
+
+const SPORT_NAMES = {
+  soccer: 'Soccer (Premier League, La Liga, etc.)',
+  basketball: 'Basketball (NBA)',
+  tennis: 'Tennis (ATP)',
+  nfl: 'NFL (American Football)',
+  mlb: 'MLB (Baseball)',
+};
+
+// Bazaar schema - this creates the dropdown in x402scan!
+const bazaarSchema = {
+  input: { sport: 'soccer' },
+  output: {
+    sport: 'soccer',
+    count: 2,
+    opportunities: [
+      {
+        id: 'arb_001',
+        match_name: 'Manchester United vs Liverpool',
+        profit_percentage: 2.3,
+        guaranteed_profit: '$2.30',
+        betting_instructions: 'Man Utd: $32.26 @ 3.10 on DraftKings | Draw: $29.41 @ 3.40 on FanDuel | Liverpool: $38.46 @ 2.60 on BetMGM'
+      }
+    ]
+  },
+  schema: {
+    type: 'object',
+    properties: {
+      sport: {
+        type: 'string',
+        enum: SUPPORTED_SPORTS,
+        description: 'Sport to find arbitrage opportunities for',
+      },
+    },
+    required: ['sport'],
+  },
+};
 
 // ============================================
 // ARBITRAGE CALCULATOR (embedded)
@@ -234,6 +279,22 @@ function apiKeyAuth(req, res, next) {
 app.use(
   paymentMiddleware(
     {
+      'POST /api/opportunities/sport': {
+        accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
+        description: 'Sports betting arbitrage opportunities. Find guaranteed profit across bookmakers for Soccer, Basketball (NBA), Tennis, NFL, or MLB.',
+        mimeType: 'application/json',
+        extensions: {
+          ...declareDiscoveryExtension(bazaarSchema),
+        },
+      },
+      'GET /api/opportunities/sport': {
+        accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
+        description: 'Sports betting arbitrage opportunities. Find guaranteed profit across bookmakers for Soccer, Basketball (NBA), Tennis, NFL, or MLB.',
+        mimeType: 'application/json',
+        extensions: {
+          ...declareDiscoveryExtension(bazaarSchema),
+        },
+      },
       'GET /api/opportunities/sport/*': {
         accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
         description: 'Get arbitrage opportunities for a specific sport (soccer, basketball, tennis, nfl, mlb)',
@@ -249,6 +310,39 @@ app.use(
 // ============================================
 // FREE ENDPOINTS (no payment required)
 // ============================================
+
+// x402 Discovery Document
+app.get('/.well-known/x402', (req, res) => {
+  res.json({
+    version: 1,
+    resources: [
+      `${BASE_URL}/api/opportunities/sport`
+    ],
+    instructions: `# ArbitrageEdge - Sports Betting Arbitrage API
+
+Find guaranteed profit opportunities across multiple bookmakers.
+
+## How to Use
+Select a sport from the dropdown and click Fetch. Supported sports:
+${SUPPORTED_SPORTS.map(sport => `- **${sport}** (${SPORT_NAMES[sport]})`).join('\n')}
+
+## Pricing
+- **$0.03 USDC** per query
+- **Network:** Base Mainnet
+- **Payment:** Gasless EIP-3009 signatures
+
+## What You Get
+- Live arbitrage opportunities for selected sport
+- Exact betting instructions (which bookmaker, how much to stake)
+- Guaranteed profit percentage regardless of outcome
+- Match details and odds
+
+## Support
+- Twitter: [@BreakTheCubicle](https://x.com/BreakTheCubicle)
+`,
+  });
+});
+
 app.get('/', (req, res) => {
   res.send(`
 <!DOCTYPE html>
@@ -354,7 +448,80 @@ app.get('/api/opportunities/sports/list', (req, res) => {
 // PROTECTED ENDPOINTS (payment OR API key required)
 // ============================================
 
-// Get opportunities for a specific sport - $0.03
+// POST /api/opportunities/sport - x402scan sends sport in body (dropdown selection)
+app.post('/api/opportunities/sport', apiKeyAuth, (req, res) => {
+  if (!req.authMethod) req.authMethod = 'x402';
+  
+  console.log('\n📥 POST /api/opportunities/sport received:');
+  console.log('   Body:', JSON.stringify(req.body));
+  console.log('   Query:', JSON.stringify(req.query));
+  
+  // Try multiple ways to get the sport parameter
+  let sport = 'soccer'; // default
+  
+  if (req.body?.sport) {
+    sport = req.body.sport;
+    console.log('   Found sport in body:', sport);
+  } else if (typeof req.body === 'string') {
+    sport = req.body;
+    console.log('   Found sport as body string:', sport);
+  } else if (req.query?.sport) {
+    sport = req.query.sport;
+    console.log('   Found sport in query:', sport);
+  } else if (req.body?.input?.sport) {
+    sport = req.body.input.sport;
+    console.log('   Found sport in body.input:', sport);
+  } else {
+    console.log('   No sport found, using default soccer');
+  }
+  
+  const { min_profit, stake } = req.query;
+  
+  const validSports = ['soccer', 'basketball', 'tennis', 'nfl', 'mlb'];
+  if (!validSports.includes(sport.toLowerCase())) {
+    return res.status(400).json({ 
+      success: false, 
+      error: `Invalid sport. Valid options: ${validSports.join(', ')}` 
+    });
+  }
+  
+  const opportunities = generateMockOpportunities(sport, min_profit, stake ? parseFloat(stake) : null);
+  
+  res.json({
+    success: true,
+    sport: sport.toLowerCase(),
+    count: opportunities.length,
+    opportunities,
+    auth_method: req.authMethod,
+    price_paid: '$0.03',
+    cache_info: { cached: false, generated_at: new Date().toISOString() }
+  });
+});
+
+// GET /api/opportunities/sport - for x402scan testing (defaults to soccer)
+app.get('/api/opportunities/sport', apiKeyAuth, (req, res) => {
+  if (!req.authMethod) req.authMethod = 'x402';
+  
+  console.log('\n📥 GET /api/opportunities/sport received:');
+  console.log('   Query:', JSON.stringify(req.query));
+  
+  const sport = req.query?.sport || 'soccer';
+  const { min_profit, stake } = req.query;
+  
+  const opportunities = generateMockOpportunities(sport, min_profit, stake ? parseFloat(stake) : null);
+  
+  res.json({
+    success: true,
+    sport: sport.toLowerCase(),
+    count: opportunities.length,
+    opportunities,
+    auth_method: req.authMethod,
+    price_paid: '$0.03',
+    cache_info: { cached: false, generated_at: new Date().toISOString() }
+  });
+});
+
+// GET /api/opportunities/sport/:sport - URL-based access (backwards compatible)
 app.get('/api/opportunities/sport/:sport', apiKeyAuth, (req, res) => {
   if (!req.authMethod) req.authMethod = 'x402';
   
