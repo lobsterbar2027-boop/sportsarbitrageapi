@@ -27,10 +27,12 @@ const ODDS_API_KEY = process.env.ODDS_API_KEY;
 const ODDS_API_BASE = 'https://api.the-odds-api.com/v4';
 
 // Sports configuration for The Odds API
+// See https://the-odds-api.com/sports-odds-data/sports-apis.html for all sport keys
 const SPORTS_CONFIG = {
   soccer: { api_key: 'soccer_epl', has_draw: true, display_name: 'Soccer - Premier League' },
   basketball: { api_key: 'basketball_nba', has_draw: false, display_name: 'NBA Basketball' },
-  tennis: { api_key: 'tennis_atp_aus_open', has_draw: false, display_name: 'Tennis - ATP' },
+  tennis: { api_key: 'tennis_atp_aus_open', has_draw: false, display_name: 'Tennis - ATP', 
+            fallback_keys: ['tennis_wta_aus_open', 'tennis_atp_us_open', 'tennis_wta_us_open'] },
   nfl: { api_key: 'americanfootball_nfl', has_draw: false, display_name: 'NFL' },
   mlb: { api_key: 'baseball_mlb', has_draw: false, display_name: 'MLB Baseball' },
 };
@@ -215,84 +217,95 @@ async function scrapeOddsForSport(sport) {
   const sportConfig = SPORTS_CONFIG[sport];
   if (!sportConfig) {
     console.log(`❌ Unknown sport: ${sport}`);
-    return [];
+    return { matches: [], error: `Unknown sport: ${sport}` };
   }
   
   console.log(`🔍 Scraping ${sportConfig.display_name} from The Odds API...`);
   
   if (!ODDS_API_KEY) {
-    console.log('⚠️ ODDS_API_KEY not set, using mock data');
-    return [];
+    console.log('❌ ODDS_API_KEY not set in Railway environment variables');
+    return { matches: [], error: 'ODDS_API_KEY not configured. Add it in Railway Variables.' };
   }
   
-  try {
-    const url = `${ODDS_API_BASE}/sports/${sportConfig.api_key}/odds`;
-    
-    const response = await fetch(url + '?' + new URLSearchParams({
-      apiKey: ODDS_API_KEY,
-      regions: 'us,uk',
-      markets: 'h2h',
-      oddsFormat: 'decimal'
-    }));
-    
-    if (!response.ok) {
-      console.error(`❌ API Error: ${response.status} - ${response.statusText}`);
-      return [];
-    }
-    
-    const games = await response.json();
-    
-    if (!games || games.length === 0) {
-      console.log(`ℹ️ No games found for ${sport}`);
-      return [];
-    }
-    
-    // Convert to our odds format
-    const allOdds = [];
-    
-    for (const game of games) {
-      const matchOdds = [];
+  // Try main API key and fallbacks
+  const keysToTry = [sportConfig.api_key, ...(sportConfig.fallback_keys || [])];
+  
+  for (const apiKey of keysToTry) {
+    try {
+      console.log(`   Trying API key: ${apiKey}`);
+      const url = `${ODDS_API_BASE}/sports/${apiKey}/odds`;
       
-      for (const bookmaker of game.bookmakers) {
-        const market = bookmaker.markets.find(m => m.key === 'h2h');
-        if (!market || !market.outcomes) continue;
-        
-        const homeOutcome = market.outcomes.find(o => o.name === game.home_team);
-        const awayOutcome = market.outcomes.find(o => o.name === game.away_team);
-        const drawOutcome = market.outcomes.find(o => o.name === 'Draw');
-        
-        if (!homeOutcome || !awayOutcome) continue;
-        
-        matchOdds.push({
-          team1: game.home_team,
-          team2: game.away_team,
-          bookmaker: bookmaker.title,
-          odds1: parseFloat(homeOutcome.price),
-          odds2: parseFloat(awayOutcome.price),
-          draw_odds: drawOutcome ? parseFloat(drawOutcome.price) : null,
-        });
+      const response = await fetch(url + '?' + new URLSearchParams({
+        apiKey: ODDS_API_KEY,
+        regions: 'us,uk,eu',
+        markets: 'h2h',
+        oddsFormat: 'decimal'
+      }));
+      
+      if (!response.ok) {
+        console.log(`   ⚠️ ${apiKey}: ${response.status} - ${response.statusText}`);
+        continue;
       }
       
-      // Need at least 2 bookmakers to find arbitrage
-      if (matchOdds.length >= 2) {
-        allOdds.push({
-          match_name: `${game.home_team} vs ${game.away_team}`,
-          start_time: game.commence_time,
-          sport: sport,
-          league: sportConfig.display_name,
-          odds: matchOdds,
-          has_draw: sportConfig.has_draw
-        });
+      const games = await response.json();
+      
+      if (!games || games.length === 0) {
+        console.log(`   ⚠️ ${apiKey}: No games found`);
+        continue;
       }
+      
+      console.log(`   ✅ ${apiKey}: Found ${games.length} games`);
+      
+      // Convert to our odds format
+      const allMatches = [];
+      
+      for (const game of games) {
+        const matchOdds = [];
+        
+        for (const bookmaker of game.bookmakers) {
+          const market = bookmaker.markets.find(m => m.key === 'h2h');
+          if (!market || !market.outcomes) continue;
+          
+          const homeOutcome = market.outcomes.find(o => o.name === game.home_team);
+          const awayOutcome = market.outcomes.find(o => o.name === game.away_team);
+          const drawOutcome = market.outcomes.find(o => o.name === 'Draw');
+          
+          if (!homeOutcome || !awayOutcome) continue;
+          
+          matchOdds.push({
+            team1: game.home_team,
+            team2: game.away_team,
+            bookmaker: bookmaker.title,
+            odds1: parseFloat(homeOutcome.price),
+            odds2: parseFloat(awayOutcome.price),
+            draw_odds: drawOutcome ? parseFloat(drawOutcome.price) : null,
+          });
+        }
+        
+        // Need at least 2 bookmakers to find arbitrage
+        if (matchOdds.length >= 2) {
+          allMatches.push({
+            match_name: `${game.home_team} vs ${game.away_team}`,
+            start_time: game.commence_time,
+            sport: sport,
+            league: sportConfig.display_name,
+            odds: matchOdds,
+            has_draw: sportConfig.has_draw
+          });
+        }
+      }
+      
+      console.log(`✅ Processed ${allMatches.length} matches with 2+ bookmakers for ${sport}`);
+      return { matches: allMatches, error: null, apiKeyUsed: apiKey };
+      
+    } catch (error) {
+      console.error(`   ❌ ${apiKey} error:`, error.message);
+      continue;
     }
-    
-    console.log(`✅ Scraped ${allOdds.length} matches for ${sport}`);
-    return allOdds;
-    
-  } catch (error) {
-    console.error(`❌ Error scraping ${sport}:`, error.message);
-    return [];
   }
+  
+  // All keys failed
+  return { matches: [], error: `No active events found for ${sport}. Season may be off or no matches scheduled.` };
 }
 
 /**
@@ -339,6 +352,12 @@ function findArbitrageOpportunities(matches, minProfit = 0, stake = 100) {
 async function getOpportunities(sport, minProfit = 0, stake = 100) {
   const sportLower = sport.toLowerCase();
   
+  // Validate sport
+  if (!SPORTS_CONFIG[sportLower]) {
+    console.log(`❌ Invalid sport: ${sport}`);
+    return { opportunities: [], error: 'Invalid sport' };
+  }
+  
   // Check cache first
   if (isCacheValid(sportLower)) {
     const cached = cache.data[sportLower];
@@ -346,7 +365,7 @@ async function getOpportunities(sport, minProfit = 0, stake = 100) {
     console.log(`✅ Using cached data for ${sport} (${cacheAge} min old)`);
     
     // Filter by minProfit and recalculate stakes if needed
-    let opportunities = cached.opportunities;
+    let opportunities = [...cached.opportunities]; // Clone to avoid mutation
     if (minProfit > 0) {
       opportunities = opportunities.filter(opp => opp.profit_percentage >= minProfit);
     }
@@ -366,102 +385,64 @@ async function getOpportunities(sport, minProfit = 0, stake = 100) {
     return { opportunities, fromCache: true, cacheAge };
   }
   
+  // Check if API key is configured
+  if (!ODDS_API_KEY) {
+    console.log(`⚠️ ODDS_API_KEY not configured`);
+    return { 
+      opportunities: [], 
+      error: 'API not configured',
+      message: 'The Odds API key is not configured. Please contact the API administrator.'
+    };
+  }
+  
   // Scrape fresh data
-  console.log(`🔄 Cache expired/empty for ${sport}, scraping...`);
-  const matches = await scrapeOddsForSport(sportLower);
+  console.log(`🔄 Cache expired/empty for ${sport}, scraping from The Odds API...`);
   
-  // If no matches from API, fall back to mock data
-  if (matches.length === 0) {
-    console.log(`⚠️ No real data, using mock data for ${sport}`);
-    const mockOpps = generateMockOpportunities(sportLower, minProfit, stake);
-    return { opportunities: mockOpps, fromCache: false, mock: true };
+  try {
+    const scrapeResult = await scrapeOddsForSport(sportLower);
+    const matches = scrapeResult.matches || [];
+    
+    console.log(`📊 Scraped ${matches.length} matches for ${sport}`);
+    
+    // If no matches and there's an error, return it
+    if (matches.length === 0 && scrapeResult.error) {
+      return { 
+        opportunities: [], 
+        fromCache: false,
+        error: scrapeResult.error,
+        message: scrapeResult.error
+      };
+    }
+    
+    // Find arbitrage opportunities
+    const opportunities = findArbitrageOpportunities(matches, minProfit, stake);
+    
+    console.log(`💰 Found ${opportunities.length} arbitrage opportunities`);
+    
+    // Cache the results (with default stake for later filtering)
+    const opportunitiesForCache = findArbitrageOpportunities(matches, 0, 100);
+    cache.data[sportLower] = {
+      opportunities: opportunitiesForCache,
+      timestamp: Date.now(),
+      matchesScraped: matches.length
+    };
+    
+    console.log(`💾 Cached ${opportunitiesForCache.length} opportunities for ${sport}`);
+    
+    return { 
+      opportunities, 
+      fromCache: false, 
+      scraped: true,
+      matchesAnalyzed: matches.length
+    };
+    
+  } catch (error) {
+    console.error(`❌ Error in getOpportunities:`, error);
+    return { 
+      opportunities: [], 
+      error: error.message 
+    };
   }
-  
-  // Find arbitrage opportunities
-  const opportunities = findArbitrageOpportunities(matches, minProfit, stake);
-  
-  // Cache the results (with default stake for later filtering)
-  const opportunitiesForCache = findArbitrageOpportunities(matches, 0, 100);
-  cache.data[sportLower] = {
-    opportunities: opportunitiesForCache,
-    timestamp: Date.now()
-  };
-  
-  console.log(`💾 Cached ${opportunitiesForCache.length} opportunities for ${sport}`);
-  console.log(`📊 Cache valid for next 30 minutes`);
-  
-  return { opportunities, fromCache: false, scraped: true };
-}
-
-// ============================================
-// MOCK DATA GENERATOR (for demo/testing)
-// ============================================
-function generateMockOpportunities(sport, minProfit, stake) {
-  const sports = {
-    soccer: [
-      { id: 'arb_001', match: { name: 'Manchester United vs Liverpool', sport: 'soccer', league: 'Premier League', start_time: new Date(Date.now() + 3600000).toISOString() },
-        profit_percentage: 2.3, total_stake: stake || 100, guaranteed_profit: stake ? (stake * 0.023).toFixed(2) : 2.30,
-        bets: [
-          { outcome: 'Man Utd', bookmaker: 'DraftKings', odds: 3.10, stake_pct: 32.26, stake_amount: stake ? (stake * 0.3226).toFixed(2) : 32.26 },
-          { outcome: 'Draw', bookmaker: 'FanDuel', odds: 3.40, stake_pct: 29.41, stake_amount: stake ? (stake * 0.2941).toFixed(2) : 29.41 },
-          { outcome: 'Liverpool', bookmaker: 'BetMGM', odds: 2.60, stake_pct: 38.46, stake_amount: stake ? (stake * 0.3846).toFixed(2) : 38.46 }
-        ], detected_at: new Date().toISOString() },
-      { id: 'arb_002', match: { name: 'Barcelona vs Real Madrid', sport: 'soccer', league: 'La Liga', start_time: new Date(Date.now() + 7200000).toISOString() },
-        profit_percentage: 1.8, total_stake: stake || 100, guaranteed_profit: stake ? (stake * 0.018).toFixed(2) : 1.80,
-        bets: [
-          { outcome: 'Barcelona', bookmaker: 'Caesars', odds: 2.45, stake_pct: 40.82, stake_amount: stake ? (stake * 0.4082).toFixed(2) : 40.82 },
-          { outcome: 'Draw', bookmaker: 'PointsBet', odds: 3.50, stake_pct: 28.57, stake_amount: stake ? (stake * 0.2857).toFixed(2) : 28.57 },
-          { outcome: 'Real Madrid', bookmaker: 'BetRivers', odds: 3.25, stake_pct: 30.77, stake_amount: stake ? (stake * 0.3077).toFixed(2) : 30.77 }
-        ], detected_at: new Date().toISOString() }
-    ],
-    basketball: [
-      { id: 'arb_003', match: { name: 'Lakers vs Celtics', sport: 'basketball', league: 'NBA', start_time: new Date(Date.now() + 5400000).toISOString() },
-        profit_percentage: 2.1, total_stake: stake || 100, guaranteed_profit: stake ? (stake * 0.021).toFixed(2) : 2.10,
-        bets: [
-          { outcome: 'Lakers', bookmaker: 'DraftKings', odds: 2.10, stake_pct: 47.62, stake_amount: stake ? (stake * 0.4762).toFixed(2) : 47.62 },
-          { outcome: 'Celtics', bookmaker: 'FanDuel', odds: 1.95, stake_pct: 51.28, stake_amount: stake ? (stake * 0.5128).toFixed(2) : 51.28 }
-        ], detected_at: new Date().toISOString() }
-    ],
-    tennis: [
-      { id: 'arb_004', match: { name: 'Djokovic vs Alcaraz', sport: 'tennis', league: 'ATP', start_time: new Date(Date.now() + 10800000).toISOString() },
-        profit_percentage: 1.5, total_stake: stake || 100, guaranteed_profit: stake ? (stake * 0.015).toFixed(2) : 1.50,
-        bets: [
-          { outcome: 'Djokovic', bookmaker: 'BetMGM', odds: 1.85, stake_pct: 54.05, stake_amount: stake ? (stake * 0.5405).toFixed(2) : 54.05 },
-          { outcome: 'Alcaraz', bookmaker: 'Caesars', odds: 2.20, stake_pct: 45.45, stake_amount: stake ? (stake * 0.4545).toFixed(2) : 45.45 }
-        ], detected_at: new Date().toISOString() }
-    ],
-    nfl: [
-      { id: 'arb_005', match: { name: 'Chiefs vs Bills', sport: 'nfl', league: 'NFL', start_time: new Date(Date.now() + 86400000).toISOString() },
-        profit_percentage: 1.9, total_stake: stake || 100, guaranteed_profit: stake ? (stake * 0.019).toFixed(2) : 1.90,
-        bets: [
-          { outcome: 'Chiefs', bookmaker: 'DraftKings', odds: 1.91, stake_pct: 52.36, stake_amount: stake ? (stake * 0.5236).toFixed(2) : 52.36 },
-          { outcome: 'Bills', bookmaker: 'PointsBet', odds: 2.05, stake_pct: 48.78, stake_amount: stake ? (stake * 0.4878).toFixed(2) : 48.78 }
-        ], detected_at: new Date().toISOString() }
-    ],
-    mlb: [
-      { id: 'arb_006', match: { name: 'Yankees vs Red Sox', sport: 'mlb', league: 'MLB', start_time: new Date(Date.now() + 14400000).toISOString() },
-        profit_percentage: 2.5, total_stake: stake || 100, guaranteed_profit: stake ? (stake * 0.025).toFixed(2) : 2.50,
-        bets: [
-          { outcome: 'Yankees', bookmaker: 'FanDuel', odds: 1.80, stake_pct: 55.56, stake_amount: stake ? (stake * 0.5556).toFixed(2) : 55.56 },
-          { outcome: 'Red Sox', bookmaker: 'BetRivers', odds: 2.25, stake_pct: 44.44, stake_amount: stake ? (stake * 0.4444).toFixed(2) : 44.44 }
-        ], detected_at: new Date().toISOString() }
-    ]
-  };
-
-  let opportunities = [];
-  
-  if (sport && sports[sport.toLowerCase()]) {
-    opportunities = sports[sport.toLowerCase()];
-  } else {
-    opportunities = Object.values(sports).flat();
-  }
-
-  // Filter by minimum profit
-  if (minProfit) {
-    opportunities = opportunities.filter(opp => opp.profit_percentage >= parseFloat(minProfit));
-  }
-
-  return opportunities;
 }
 
 // ============================================
@@ -978,69 +959,89 @@ app.post('/api/opportunities/sport', apiKeyAuth, async (req, res) => {
   
   const validSports = ['soccer', 'basketball', 'tennis', 'nfl', 'mlb'];
   if (!validSports.includes(sport.toLowerCase())) {
+    console.log(`   ❌ Invalid sport: ${sport}`);
     return res.status(400).json({ 
       success: false, 
-      error: `Invalid sport. Valid options: ${validSports.join(', ')}` 
+      error: `Invalid sport: ${sport}`,
+      valid_options: validSports
     });
   }
   
   try {
     // Get real opportunities (with caching)
+    console.log(`   🔍 Getting opportunities for ${sport}...`);
     const result = await getOpportunities(sport, minProfit, stake);
-    const opportunities = result.opportunities;
+    const opportunities = result.opportunities || [];
     
-    // Calculate average profit
-    const avgProfit = opportunities.length > 0 
-      ? (opportunities.reduce((sum, opp) => sum + opp.profit_percentage, 0) / opportunities.length).toFixed(1)
-      : 0;
+    console.log(`   📊 Result: ${opportunities.length} opportunities`);
     
     // Sport emoji mapping
     const sportEmoji = { soccer: '⚽', basketball: '🏀', tennis: '🎾', nfl: '🏈', mlb: '⚾' };
     const emoji = sportEmoji[sport.toLowerCase()] || '🎯';
+    const sportDisplay = sport.charAt(0).toUpperCase() + sport.slice(1).toLowerCase();
+    
+    // Calculate average profit
+    const avgProfit = opportunities.length > 0 
+      ? (opportunities.reduce((sum, opp) => sum + opp.profit_percentage, 0) / opportunities.length).toFixed(1)
+      : '0';
     
     // Data source info
-    const dataSource = result.mock ? 'mock (API unavailable)' : 
-                       result.fromCache ? `cache (${result.cacheAge} min old)` : 
-                       'live (The Odds API)';
+    let dataSource = 'The Odds API';
+    if (result.fromCache) {
+      dataSource = `cached (${result.cacheAge} min old)`;
+    } else if (result.error) {
+      dataSource = `error: ${result.error}`;
+    }
     
     // Create human-readable summary
-    const summary = opportunities.length > 0
-      ? `${emoji} Found ${opportunities.length} arbitrage opportunit${opportunities.length === 1 ? 'y' : 'ies'} in ${sport.charAt(0).toUpperCase() + sport.slice(1)} with avg ${avgProfit}% guaranteed profit`
-      : `${emoji} No arbitrage opportunities currently available for ${sport}. Check back soon!`;
+    let summary;
+    if (result.error === 'API not configured') {
+      summary = `⚠️ API not configured. Please set ODDS_API_KEY in environment variables.`;
+    } else if (opportunities.length > 0) {
+      summary = `${emoji} Found ${opportunities.length} arbitrage opportunit${opportunities.length === 1 ? 'y' : 'ies'} in ${sportDisplay} with avg ${avgProfit}% guaranteed profit`;
+    } else {
+      summary = `${emoji} No arbitrage opportunities currently available for ${sportDisplay}. This is normal - true arbitrage opportunities are rare and short-lived. Try again later or check another sport.`;
+    }
     
     // Format opportunities for easier reading
     const formattedOpportunities = opportunities.map(opp => ({
-      match: opp.match.name,
-      league: opp.match.league,
+      match: opp.match?.name || 'Unknown',
+      league: opp.match?.league || SPORTS_CONFIG[sport.toLowerCase()]?.display_name || sport,
       profit: `${opp.profit_percentage}% guaranteed`,
       guaranteed_profit: `$${opp.guaranteed_profit}`,
       total_stake: `$${stake}`,
-      instructions: opp.bets.map(bet => 
+      instructions: opp.bets?.map(bet => 
         `${bet.outcome}: $${bet.stake_amount} @ ${bet.odds} on ${bet.bookmaker}`
-      ).join(' | '),
-      start_time: opp.match.start_time,
+      ).join(' | ') || 'N/A',
+      start_time: opp.match?.start_time || null,
       id: opp.id
     }));
     
-    res.json({
+    const response = {
       success: true,
       sport: sport.toLowerCase(),
       summary,
       count: opportunities.length,
-      avg_profit: `${avgProfit}%`,
+      avg_profit: opportunities.length > 0 ? `${avgProfit}%` : 'N/A',
       opportunities: formattedOpportunities,
       data_source: dataSource,
       auth_method: req.authMethod,
       price_paid: '$0.03 USDC',
       timestamp: new Date().toISOString()
-    });
+    };
+    
+    console.log(`   ✅ Sending response with ${opportunities.length} opportunities`);
+    res.json(response);
     
   } catch (error) {
     console.error('❌ Error fetching opportunities:', error);
     res.status(500).json({
       success: false,
+      sport: sport.toLowerCase(),
       error: 'Failed to fetch opportunities',
-      message: error.message
+      message: error.message,
+      summary: `❌ Error fetching ${sport} opportunities: ${error.message}`,
+      timestamp: new Date().toISOString()
     });
   }
 });
