@@ -464,50 +464,70 @@ app.use((req, res, next) => {
 
 // ============================================
 // API KEY MIDDLEWARE (for backward compatibility)
+// Must run BEFORE x402 middleware!
 // ============================================
 function apiKeyAuth(req, res, next) {
   const apiKey = req.headers['x-api-key'];
   if (apiKey && VALID_API_KEYS.has(apiKey)) {
     req.authMethod = 'api_key';
+    console.log(`   🔑 Valid API key, bypassing x402`);
     return next();
   }
   // No valid API key - let x402 handle it
   next();
 }
 
+// Check API key BEFORE x402 middleware runs
+// This bypasses x402 payment for valid API keys
+app.use('/api/opportunities', (req, res, next) => {
+  const apiKey = req.headers['x-api-key'];
+  if (apiKey && VALID_API_KEYS.has(apiKey)) {
+    req.authMethod = 'api_key';
+    req.skipX402 = true;
+    console.log(`   🔑 API key authenticated: ${apiKey.substring(0, 8)}...`);
+  }
+  next();
+});
+
 // ============================================
 // x402 PAYMENT MIDDLEWARE
 // ============================================
-app.use(
-  paymentMiddleware(
-    {
-      'POST /api/opportunities/sport': {
-        accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
-        description: 'Sports betting arbitrage opportunities. Find guaranteed profit across bookmakers for Soccer, Basketball (NBA), Tennis, NFL, or MLB.',
-        mimeType: 'application/json',
-        extensions: {
-          ...declareDiscoveryExtension(bazaarSchema),
-        },
-      },
-      'GET /api/opportunities/sport': {
-        accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
-        description: 'Sports betting arbitrage opportunities. Find guaranteed profit across bookmakers for Soccer, Basketball (NBA), Tennis, NFL, or MLB.',
-        mimeType: 'application/json',
-        extensions: {
-          ...declareDiscoveryExtension(bazaarSchema),
-        },
-      },
-      'GET /api/opportunities/sport/*': {
-        accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
-        description: 'Get arbitrage opportunities for a specific sport (soccer, basketball, tennis, nfl, mlb)',
-        mimeType: 'application/json',
-      },
+// Custom wrapper to skip x402 if API key is valid
+const x402Routes = {
+  'POST /api/opportunities/sport': {
+    accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
+    description: 'Sports betting arbitrage opportunities. Find guaranteed profit across bookmakers for Soccer, Basketball (NBA), Tennis, NFL, or MLB.',
+    mimeType: 'application/json',
+    extensions: {
+      ...declareDiscoveryExtension(bazaarSchema),
     },
-    resourceServer,
-    undefined,
-    paywall,
-  ),
-);
+  },
+  'GET /api/opportunities/sport': {
+    accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
+    description: 'Sports betting arbitrage opportunities. Find guaranteed profit across bookmakers for Soccer, Basketball (NBA), Tennis, NFL, or MLB.',
+    mimeType: 'application/json',
+    extensions: {
+      ...declareDiscoveryExtension(bazaarSchema),
+    },
+  },
+  'GET /api/opportunities/sport/*': {
+    accepts: [{ scheme: 'exact', price: '$0.03', network: NETWORK, payTo }],
+    description: 'Get arbitrage opportunities for a specific sport (soccer, basketball, tennis, nfl, mlb)',
+    mimeType: 'application/json',
+  },
+};
+
+const x402Handler = paymentMiddleware(x402Routes, resourceServer, undefined, paywall);
+
+// Wrap x402 middleware to skip if API key is present
+app.use((req, res, next) => {
+  if (req.skipX402) {
+    // API key was valid, skip x402 payment check
+    return next();
+  }
+  // No API key, run x402 payment middleware
+  x402Handler(req, res, next);
+});
 
 // ============================================
 // FREE ENDPOINTS (no payment required)
@@ -928,7 +948,8 @@ app.get('/api/opportunities/sports/list', (req, res) => {
 // ============================================
 
 // POST /api/opportunities/sport - x402scan sends sport in body (dropdown selection)
-app.post('/api/opportunities/sport', apiKeyAuth, async (req, res) => {
+app.post('/api/opportunities/sport', async (req, res) => {
+  // authMethod already set by API key middleware if valid
   if (!req.authMethod) req.authMethod = 'x402';
   
   console.log('\n📥 POST /api/opportunities/sport received:');
@@ -1047,7 +1068,7 @@ app.post('/api/opportunities/sport', apiKeyAuth, async (req, res) => {
 });
 
 // GET /api/opportunities/sport - for x402scan testing (defaults to soccer)
-app.get('/api/opportunities/sport', apiKeyAuth, async (req, res) => {
+app.get('/api/opportunities/sport', async (req, res) => {
   if (!req.authMethod) req.authMethod = 'x402';
   
   console.log('\n📥 GET /api/opportunities/sport received:');
@@ -1108,7 +1129,7 @@ app.get('/api/opportunities/sport', apiKeyAuth, async (req, res) => {
 });
 
 // GET /api/opportunities/sport/:sport - URL-based access (backwards compatible)
-app.get('/api/opportunities/sport/:sport', apiKeyAuth, async (req, res) => {
+app.get('/api/opportunities/sport/:sport', async (req, res) => {
   if (!req.authMethod) req.authMethod = 'x402';
   
   const { sport } = req.params;
