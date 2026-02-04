@@ -488,6 +488,17 @@ app.use('/api/opportunities', (req, res, next) => {
   }
   next();
 });
+// RapidAPI authentication bypass
+app.use('/api/opportunities', (req, res, next) => {
+  const rapidApiKey = req.headers['x-rapidapi-key'];
+  const rapidApiHost = req.headers['x-rapidapi-host'];
+  if (rapidApiKey && rapidApiHost) {
+    req.authMethod = 'rapidapi';
+    req.skipX402 = true;
+    console.log(`   🚀 RapidAPI request authenticated`);
+  }
+  next();
+});
 
 // ============================================
 // x402 PAYMENT MIDDLEWARE
